@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ProgressSink } from '@alpha-cent/connector-sdk';
+import type { ProgressSink } from '@kiagent/connector-sdk';
 import type { Host, Converter } from './host';
 import type { InstagramMessage, InstagramThread } from './types';
 import { upsertThreadDays } from './chat-day';

@@ -2,7 +2,7 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Document } from '@alpha-cent/connector-sdk';
+import type { Document } from '@kiagent/connector-sdk';
 import type { InstagramMessage } from '../types';
 import {
   guessMimeType,

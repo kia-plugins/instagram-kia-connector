@@ -2,7 +2,7 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ProgressSink } from '@alpha-cent/connector-sdk';
+import type { ProgressSink } from '@kiagent/connector-sdk';
 import {
   fixMetaMojibake,
   parseThreadJson,

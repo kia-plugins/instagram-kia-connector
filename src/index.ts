@@ -5,7 +5,7 @@ import type {
   ConnectorHost,
   ConnectorSetupHost,
   ProgressSink,
-} from '@alpha-cent/connector-sdk';
+} from '@kiagent/connector-sdk';
 import type { Converter } from './host';
 import { loadTokenBlob } from './safe-storage-blob';
 import { decodeInstagramTokenFromStorage } from './token';

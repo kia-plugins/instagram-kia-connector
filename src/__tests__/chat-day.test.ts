@@ -2,7 +2,7 @@ import { buildSourceId, dayKey, upsertThreadDays } from '../chat-day';
 import { DOC_TYPE } from '../types';
 import type { InstagramMessage, InstagramThread } from '../types';
 import { captureHost } from './mocks';
-import type { Document } from '@alpha-cent/connector-sdk';
+import type { Document } from '@kiagent/connector-sdk';
 
 test('buildSourceId is thread + local day', () => {
   const ms = Date.UTC(2026, 5, 13, 10, 0, 0);

@@ -4,7 +4,7 @@ import type {
   DocumentId,
   PendingDocument,
   SyncStateRow,
-} from '@alpha-cent/connector-sdk';
+} from '@kiagent/connector-sdk';
 import type { InstagramClient } from '../client';
 import type { InstagramMessage, InstagramThread } from '../types';
 
