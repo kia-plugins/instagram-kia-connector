@@ -178,11 +178,29 @@ export function createInstagramSource(
       let newestObserved = cursorMs;
 
       for (const thread of threads) {
-        newestObserved = Math.max(newestObserved, thread.last_activity_ms);
+        // Belt-and-suspenders (the client already floors unparseable
+        // updated_time to 0): a non-finite value folded into Math.max would
+        // make the final cursor's toISOString() throw at the END of every
+        // sweep — a permanently failing pull.
+        if (Number.isFinite(thread.last_activity_ms)) {
+          newestObserved = Math.max(newestObserved, thread.last_activity_ms);
+        }
         if (thread.last_activity_ms <= cursorMs) continue;
         if (session.signal.aborted) return;
         try {
-          const messages = await client.listMessages(thread.id);
+          const messages = (await client.listMessages(thread.id)).filter(
+            (m) => {
+              if (Number.isFinite(m.ts_ms)) return true;
+              // An unparseable created_time would render day 'NaN-NaN-NaN'
+              // (a broken externalId) and a throwing toISOString() in
+              // toDocument — skip just that message, keep the thread.
+              session.log(
+                'warn',
+                `instagram: message ${m.id} in thread ${thread.id} skipped: unparseable created_time`,
+              );
+              return false;
+            },
+          );
           if (messages.length === 0) continue;
           const dayItems = await buildDayItems(session, thread, messages);
           // Eager media download, idempotent BEFORE the fetch: an attachment

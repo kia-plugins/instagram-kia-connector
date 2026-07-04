@@ -313,6 +313,66 @@ describe('pull — sweep and cursor', () => {
     });
   });
 
+  it('tolerates a thread with an unparseable updated_time: it sorts as never-active (no message fetch, no NaN) and the final cursor still advances from healthy threads', async () => {
+    const { fetchFn, calls } = routedFetch([
+      {
+        match: '/me/conversations',
+        res: jsonResponse(200, {
+          data: [
+            { id: 'tbad', updated_time: 'not-a-date' }, // Date.parse → NaN territory
+            threadJson('t1', T2),
+          ],
+        }),
+      },
+      { match: '/t1/messages', res: jsonResponse(200, { data: [msgJson('m1', T2, 'alice', 'hi')] }) },
+    ]);
+    const source = createInstagramSource(makeHost(fetchFn).host, instantClock);
+    const { session } = makeSession({ password: 'IGQVJtest-token' });
+
+    const batches = await drain(source, session, null);
+
+    // the garbage thread gated out as never-active — no /tbad/messages call
+    expect(calls.some((u) => u.includes('/tbad/messages'))).toBe(false);
+    expect(batches).toHaveLength(2); // t1's batch + the final cursor batch
+    expect((batches[0].items[0] as ChatDayItem).thread.id).toBe('t1');
+    // no NaN poisoning: the final cursor is a valid ISO from the healthy thread
+    expect(batches[1]).toEqual({
+      phase: 'live',
+      items: [],
+      cursor: { last_activity_iso: T2 },
+    });
+  });
+
+  it('skips a message with an unparseable created_time with a warn; the rest of the thread still emits', async () => {
+    const { fetchFn } = routedFetch([
+      { match: '/me/conversations', res: jsonResponse(200, { data: [threadJson('t1', T2)] }) },
+      {
+        match: '/t1/messages',
+        res: jsonResponse(200, {
+          data: [
+            msgJson('mBad', 'garbage-time', 'alice', 'lost to NaN'),
+            msgJson('m1', T2, 'alice', 'kept'),
+          ],
+        }),
+      },
+    ]);
+    const source = createInstagramSource(makeHost(fetchFn).host, instantClock);
+    const { session, warnings } = makeSession({ password: 'IGQVJtest-token' });
+
+    const batches = await drain(source, session, null);
+
+    const dayItem = batches[0].items[0] as ChatDayItem;
+    expect(dayItem.messages.map((m) => m.id)).toEqual(['m1']); // bad message dropped
+    expect(dayItem.day).not.toContain('NaN');
+    expect(warnings.some((w) => w.includes('mBad') && w.includes('created_time'))).toBe(true);
+    // sweep completed normally: final cursor advanced, toDocument renders
+    expect(batches[1].cursor).toEqual({ last_activity_iso: T2 });
+    const doc = source.toDocument(dayItem) as DocumentInput;
+    expect(doc.externalId).toBe(`thread:t1:${dayKey(Date.parse(T2))}`);
+    expect(doc.markdown).toContain('kept');
+    expect(doc.markdown).not.toContain('lost to NaN');
+  });
+
   it('second run: threads at or below the committed cursor are gated out without fetching their messages', async () => {
     const { fetchFn, calls } = routedFetch([
       {

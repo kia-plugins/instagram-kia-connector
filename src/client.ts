@@ -70,6 +70,12 @@ function parseGraphError(body: string): { code?: number; message?: string } {
   }
 }
 
+/** Epoch-ms from an optional ISO string; non-finite (unparseable) → 0. */
+function parseTimeMs(iso: string | undefined): number {
+  const ms = iso ? Date.parse(iso) : 0;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 /** v1 predicate, verbatim: consulted for non-2xx responses only. */
 export function isRetryableGraph(status: number, body: string): boolean {
   if (status === 429 || status >= 500) return true;
@@ -212,7 +218,12 @@ export class InstagramClient {
       participants: (t.participants?.data ?? [])
         .map((p) => p.username ?? '')
         .filter(Boolean),
-      last_activity_ms: t.updated_time ? Date.parse(t.updated_time) : 0,
+      // A truthy-but-unparseable updated_time must not become NaN: NaN would
+      // poison pull()'s Math.max high-water mark (the final cursor's
+      // toISOString() throws) and never gate out (`NaN <= cursorMs` is
+      // false), re-running the thread every poll. Non-finite → 0, so the
+      // thread sorts as never-active.
+      last_activity_ms: parseTimeMs(t.updated_time),
     }));
   }
 
