@@ -1,57 +1,9 @@
 {
   "id": "kia.instagram",
-  "displayName": "Instagram",
-  "version": "1.0.0",
-  "hostApi": "^2.0.0",
+  "name": "Instagram",
+  "version": "2.0.0",
+  "engine": "^1.0.0",
   "entry": "dist/index.js",
-  "icon": "instagram",
-  "permissions": ["db:read", "db:write", "net", "secrets", "files:read"],
-  "activationEvents": ["onStartup"],
-  "contributes": {
-    "sources": [
-      {
-        "id": "instagram",
-        "displayName": "Instagram",
-        "icon": "instagram",
-        "capabilities": {
-          "multiAccount": true,
-          "requiresAuth": true,
-          "supportsBackfill": false,
-          "supportsDelta": true,
-          "supportsRealtime": false
-        },
-        "inAddSource": true,
-        "pollable": true,
-        "submit": "instagram-submit",
-        "steps": [
-          {
-            "type": "instruction",
-            "title": "Create a Meta app & token",
-            "body": "Create an app, generate a long-lived access token.",
-            "link": "https://developers.facebook.com/docs/instagram-platform"
-          },
-          {
-            "type": "instruction",
-            "title": "Verify scope",
-            "body": "Token needs read access to the account's media and profile."
-          },
-          {
-            "type": "input-fields",
-            "validate": "instagram-token",
-            "fields": [
-              {
-                "key": "token",
-                "label": "Access token",
-                "input": "password",
-                "placeholder": "Long-lived token…"
-              }
-            ]
-          }
-        ],
-        "actions": [
-          { "key": "import", "label": "Import export…", "hook": "instagram-import" }
-        ]
-      }
-    ]
-  }
+  "caps": ["net", "query"],
+  "contributes": { "sources": ["instagram"] }
 }

@@ -1,78 +1,112 @@
-import { buildSourceId, dayKey, upsertThreadDays } from '../chat-day';
-import { DOC_TYPE } from '../types';
-import type { InstagramMessage, InstagramThread } from '../types';
-import { captureHost } from './mocks';
-import type { Document } from '@kiagent/connector-sdk';
+/**
+ * Pure chat-day helpers — grouping, rendering, merge-dedupe. Ported from the
+ * v1 suite (`git show 16fd254:src/__tests__/chat-day.test.ts`); the
+ * host-coupled upsertThreadDays tests moved to source.test.ts (the
+ * read-modify-write is pull()'s job now).
+ */
+import {
+  buildChatDayExternalId,
+  dayKey,
+  dayTitle,
+  groupByDay,
+  mergeMessages,
+  renderDay,
+} from '../chat-day';
+import type { InstagramMessage } from '../types';
 
-test('buildSourceId is thread + local day', () => {
-  const ms = Date.UTC(2026, 5, 13, 10, 0, 0);
-  expect(buildSourceId('t1', dayKey(ms))).toBe(`thread:t1:${dayKey(ms)}`);
-});
-
-test('upsertThreadDays groups by day and upserts one doc per day with sha256 hash', async () => {
-  const thread: InstagramThread = {
-    id: 't1',
-    name: 'Alice',
-    participants: ['Alice', 'me'],
-    last_activity_ms: 0,
-  };
-  const day = Date.UTC(2026, 5, 13, 9, 0, 0);
-  const msgs: InstagramMessage[] = [
-    {
-      id: 'm1',
-      from_id: 'a',
-      from_name: 'Alice',
-      text: 'hi',
-      ts_ms: day,
-      attachments: [],
-    },
-    {
-      id: 'm2',
-      from_id: 'me',
-      from_name: 'me',
-      text: 'yo',
-      ts_ms: day + 1000,
-      attachments: [],
-    },
-  ];
-  const { ctx, docs } = captureHost();
-  await upsertThreadDays(ctx, thread, msgs);
-  expect(docs).toHaveLength(1);
-  expect(docs[0].source).toBe('instagram');
-  expect(docs[0].type).toBe(DOC_TYPE);
-  expect(docs[0].source_id).toBe(`thread:t1:${dayKey(day)}`);
-  expect(docs[0].content_hash).toMatch(/^[0-9a-f]{64}$/);
-  expect(docs[0].markdown).toContain('Alice');
-  expect(docs[0].markdown).toContain('hi');
-});
-
-test('re-ingesting the same messages is idempotent (merge dedups by id)', async () => {
-  const thread: InstagramThread = {
-    id: 't1',
-    name: 'Alice',
-    participants: [],
-    last_activity_ms: 0,
-  };
-  const day = Date.UTC(2026, 5, 13, 9, 0, 0);
-  const msg: InstagramMessage = {
-    id: 'm1',
+function msg(
+  id: string,
+  tsMs: number,
+  text: string,
+  extra: Partial<InstagramMessage> = {},
+): InstagramMessage {
+  return {
+    id,
     from_id: 'a',
     from_name: 'Alice',
-    text: 'hi',
-    ts_ms: day,
+    text,
+    ts_ms: tsMs,
     attachments: [],
+    ...extra,
   };
-  let stored: { metadata: Record<string, unknown> } | null = null;
-  const ctx = {
-    accountId: 7n,
-    findBySourceId: async () => stored as unknown as Document | null,
-    upsertDocument: async (d: { metadata: Record<string, unknown> }) => {
-      stored = { metadata: d.metadata };
-      return 1n;
-    },
-  } as never;
-  await upsertThreadDays(ctx, thread, [msg]);
-  const first = (stored!.metadata.messages as unknown[]).length;
-  await upsertThreadDays(ctx, thread, [msg]);
-  expect((stored!.metadata.messages as unknown[]).length).toBe(first);
+}
+
+test('buildChatDayExternalId is thread + local day', () => {
+  const ms = Date.UTC(2026, 5, 13, 10, 0, 0);
+  expect(buildChatDayExternalId('t1', dayKey(ms))).toBe(
+    `thread:t1:${dayKey(ms)}`,
+  );
+});
+
+test('dayKey is a local-time YYYY-MM-DD', () => {
+  const ms = Date.UTC(2026, 5, 13, 10, 0, 0);
+  expect(dayKey(ms)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  // same instant → same key; +24h → different key
+  expect(dayKey(ms)).toBe(dayKey(ms));
+  expect(dayKey(ms + 24 * 3600 * 1000)).not.toBe(dayKey(ms));
+});
+
+test('dayTitle renders "<name> — <Mon D, YYYY>"', () => {
+  expect(dayTitle('Alice', '2026-06-13')).toBe('Alice — Jun 13, 2026');
+  expect(dayTitle('Group chat', '2024-01-02')).toBe('Group chat — Jan 2, 2024');
+});
+
+test('renderDay emits "**<from>** (HH:MM): <text>" lines joined by blank lines', () => {
+  const t = Date.UTC(2026, 5, 13, 9, 5, 0);
+  const md = renderDay([msg('m1', t, 'hi'), msg('m2', t + 60_000, 'yo')]);
+  const lines = md.split('\n\n');
+  expect(lines).toHaveLength(2);
+  expect(lines[0]).toMatch(/^\*\*Alice\*\* \(\d{2}:\d{2}\): hi$/);
+  expect(lines[1]).toMatch(/^\*\*Alice\*\* \(\d{2}:\d{2}\): yo$/);
+});
+
+test('renderDay falls back to [type] placeholders for attachment-only messages', () => {
+  const t = Date.UTC(2026, 5, 13, 9, 0, 0);
+  const md = renderDay([
+    msg('m1', t, '', {
+      attachments: [
+        { type: 'photo', url: 'https://cdn.example/p.jpg' },
+        { type: 'video', url: 'https://cdn.example/v.mp4' },
+      ],
+    }),
+  ]);
+  expect(md).toContain('[photo] [video]');
+});
+
+test('mergeMessages unions by id (incoming wins) and sorts by ts then id', () => {
+  const t = Date.UTC(2026, 5, 13, 9, 0, 0);
+  const prior = [msg('m1', t, 'old text'), msg('m0', t - 60_000, 'scrolled out')];
+  const incoming = [msg('m1', t, 'edited'), msg('m2', t + 60_000, 'new')];
+
+  const merged = mergeMessages(prior, incoming);
+
+  expect(merged.map((m) => m.id)).toEqual(['m0', 'm1', 'm2']);
+  expect(merged[1].text).toBe('edited'); // incoming replaced prior m1
+});
+
+test('mergeMessages is idempotent — re-merging the same window changes nothing', () => {
+  const t = Date.UTC(2026, 5, 13, 9, 0, 0);
+  const window = [msg('m1', t, 'hi'), msg('m2', t + 1000, 'yo')];
+  const once = mergeMessages([], window);
+  const twice = mergeMessages(once, window);
+  expect(twice).toEqual(once);
+});
+
+test('mergeMessages breaks ts ties by id', () => {
+  const t = Date.UTC(2026, 5, 13, 9, 0, 0);
+  const merged = mergeMessages([msg('b', t, 'second')], [msg('a', t, 'first')]);
+  expect(merged.map((m) => m.id)).toEqual(['a', 'b']);
+});
+
+test('groupByDay buckets by local day preserving first-seen order', () => {
+  const d1 = Date.UTC(2026, 5, 13, 12, 0, 0);
+  const d2 = d1 + 24 * 3600 * 1000;
+  const grouped = groupByDay([
+    msg('m1', d1, 'a'),
+    msg('m2', d2, 'b'),
+    msg('m3', d1 + 1000, 'c'),
+  ]);
+  expect([...grouped.keys()]).toEqual([dayKey(d1), dayKey(d2)]);
+  expect(grouped.get(dayKey(d1))!.map((m) => m.id)).toEqual(['m1', 'm3']);
+  expect(grouped.get(dayKey(d2))!.map((m) => m.id)).toEqual(['m2']);
 });

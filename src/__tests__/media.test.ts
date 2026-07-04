@@ -1,237 +1,218 @@
-/** @jest-environment node */
-import os from 'node:os';
-import fs from 'node:fs';
-import path from 'node:path';
-import type { Document } from '@kiagent/connector-sdk';
-import type { InstagramMessage } from '../types';
+/**
+ * Media policy + eager downloader. Pure helpers ported from the v1 suite
+ * (`git show 16fd254:src/__tests__/media.test.ts`); downloadThreadMedia is
+ * exercised directly with fake deps here (no disk cache anymore — items
+ * carry bytes). Pull-level behavior (same-batch parent, query-backed
+ * idempotency) lives in source.test.ts.
+ */
 import {
+  MEDIA_SIZE_CAP_BYTES,
+  deriveFilename,
+  downloadThreadMedia,
   guessMimeType,
-  upsertExportMediaDocs,
-  downloadLiveMediaDocs,
-  FILE_DOC_TYPE,
+  isOcrCandidateAttachment,
+  type MediaDownloadDeps,
 } from '../media';
-import { mediaDir } from '../media-dir';
-import { makeInstagramByteSource } from '../byte-source';
-import { captureHost, fakeMediaResponse } from './mocks';
+import { dayKey } from '../chat-day';
+import type { InstagramMessage } from '../types';
 
-// A placeholder larger than the host's tiny-image threshold so it is treated as
-// a real OCR candidate rather than a tracking pixel.
-const BIG_JPEG = Buffer.alloc(10 * 1024, 0x7f);
+const BIG_JPEG = new Uint8Array(10 * 1024).fill(0x7f);
+
+function bytesResponse(
+  status: number,
+  body: Uint8Array,
+  headers: Record<string, string> = {},
+) {
+  return { status, statusText: '', headers, body };
+}
+
+function liveMsg(
+  attachments: { type: string; url?: string }[],
+  id = 'mLive',
+): InstagramMessage {
+  return {
+    id,
+    from_id: 'bob',
+    from_name: 'Bob',
+    text: '',
+    ts_ms: Date.UTC(2026, 5, 13, 12, 0, 0),
+    attachments,
+  };
+}
+
+function makeDeps(
+  responses: unknown[],
+  { hasDoc = async () => false }: { hasDoc?: (id: string) => Promise<boolean> } = {},
+) {
+  const fetched: string[] = [];
+  const warnings: string[] = [];
+  let i = 0;
+  const deps: MediaDownloadDeps = {
+    fetch: async (url) => {
+      fetched.push(url);
+      const res = responses[i];
+      i += 1;
+      if (res === undefined) throw new Error(`no scripted media response for ${url}`);
+      if (res instanceof Error) throw res;
+      return res;
+    },
+    hasDoc,
+    warn: (msg) => {
+      warnings.push(msg);
+    },
+  };
+  return { deps, fetched, warnings };
+}
 
 describe('guessMimeType', () => {
   test('maps known extensions case-insensitively', () => {
     expect(guessMimeType('photo.JPG')).toBe('image/jpeg');
     expect(guessMimeType('img.png')).toBe('image/png');
+    expect(guessMimeType('doc.pdf')).toBe('application/pdf');
   });
   test('returns undefined for unknown extensions', () => {
     expect(guessMimeType('weird.xyz')).toBeUndefined();
   });
 });
 
-describe('upsertExportMediaDocs (copies export bytes into the content cache)', () => {
-  let dataRoot: string;
-  let baseDir: string;
-  let root: string;
-  beforeEach(() => {
-    dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ig-data-'));
-    baseDir = mediaDir(dataRoot);
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'ig-export-'));
+describe('isOcrCandidateAttachment', () => {
+  test('photo/image kinds are candidates; video/audio never are', () => {
+    expect(isOcrCandidateAttachment({ type: 'photo' })).toBe(true);
+    expect(isOcrCandidateAttachment({ type: 'image' })).toBe(true);
+    expect(isOcrCandidateAttachment({ type: 'video', url: 'https://x/v.jpg' })).toBe(false);
+    expect(isOcrCandidateAttachment({ type: 'audio' })).toBe(false);
   });
-  afterEach(() => {
-    fs.rmSync(dataRoot, { recursive: true, force: true });
-    fs.rmSync(root, { recursive: true, force: true });
-  });
-
-  function writeMedia(relUrl: string): void {
-    const abs = path.join(root, relUrl);
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, BIG_JPEG);
-  }
-
-  function msgWith(url: string, type = 'photo'): InstagramMessage {
-    return {
-      id: 'm1',
-      from_id: 'Alice',
-      from_name: 'Alice',
-      text: '',
-      ts_ms: 1749810000000,
-      attachments: [{ type, url }],
-    };
-  }
-
-  test('creates a null-markdown file doc, caches bytes by content_hash, round-trips via the byte source', async () => {
-    const relUrl =
-      'your_instagram_activity/messages/inbox/alice/photos/pic.jpg';
-    writeMedia(relUrl);
-    const { ctx, docs } = captureHost();
-
-    const n = await upsertExportMediaDocs(ctx, root, 'alice_123', [
-      msgWith(relUrl),
-    ], { baseDir });
-
-    expect(n).toBe(1);
-    expect(docs).toHaveLength(1);
-    const doc = docs[0];
-    expect(doc.source).toBe('instagram');
-    expect(doc.type).toBe(FILE_DOC_TYPE);
-    expect(doc.type).toBe('file');
-    expect(doc.markdown).toBeNull();
-    expect(doc.content_hash).toMatch(/^[0-9a-f]{64}$/);
-    const meta = doc.metadata as Record<string, unknown>;
-    expect(meta.mime_type).toBe('image/jpeg');
-    expect(meta.filename).toBe('pic.jpg');
-    expect(meta.size_bytes as number).toBeGreaterThan(0);
-    expect(meta.extraction_status).toBe('unsupported');
-    expect(meta.thread_id).toBe('alice_123');
-    expect(meta.media_kind).toBe('photo');
-
-    // Bytes landed in the content cache keyed by content_hash.
-    const cached = path.join(baseDir, doc.content_hash!);
-    expect(fs.existsSync(cached)).toBe(true);
-    expect(fs.readFileSync(cached).equals(BIG_JPEG)).toBe(true);
-
-    // The fetch-model byte source serves them back by content_hash.
-    const src = makeInstagramByteSource(dataRoot);
-    const r = await src.fetch({}, { content_hash: doc.content_hash });
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.bytes.equals(BIG_JPEG)).toBe(true);
-  });
-
-  test('is idempotent: skips media that already has a doc (no copy)', async () => {
-    const relUrl = 'photos/existing.jpg';
-    writeMedia(relUrl);
-    const { ctx, docs } = captureHost({ existing: { id: 99n } as Document });
-
-    const n = await upsertExportMediaDocs(ctx, root, 'alice_123', [
-      msgWith(relUrl),
-    ], { baseDir });
-
-    expect(n).toBe(0);
-    expect(docs).toHaveLength(0);
-    expect(fs.existsSync(baseDir) ? fs.readdirSync(baseDir) : []).toHaveLength(
-      0,
-    );
-  });
-
-  test('skips attachments whose file is missing (no doc, no throw)', async () => {
-    const { ctx, docs } = captureHost();
-    const n = await upsertExportMediaDocs(ctx, root, 'alice_123', [
-      msgWith('photos/does-not-exist.jpg'),
-    ], { baseDir });
-    expect(n).toBe(0);
-    expect(docs).toHaveLength(0);
-  });
-
-  test('skips non-OCR attachments (video) without copying', async () => {
-    const relUrl = 'videos/clip.mp4';
-    writeMedia(relUrl);
-    const { ctx, docs } = captureHost();
-    const n = await upsertExportMediaDocs(ctx, root, 'alice_123', [
-      msgWith(relUrl, 'video'),
-    ], { baseDir });
-    expect(n).toBe(0);
-    expect(docs).toHaveLength(0);
+  test('unknown kinds fall back to the URL extension', () => {
+    expect(
+      isOcrCandidateAttachment({ type: 'media', url: 'https://cdn.example/a/p.jpeg?sig=1' }),
+    ).toBe(true);
+    expect(
+      isOcrCandidateAttachment({ type: 'media', url: 'https://cdn.example/doc.pdf' }),
+    ).toBe(true);
+    expect(
+      isOcrCandidateAttachment({ type: 'media', url: 'https://cdn.example/clip.mp4' }),
+    ).toBe(false);
+    expect(isOcrCandidateAttachment({ type: 'media' })).toBe(false);
   });
 });
 
-describe('downloadLiveMediaDocs (eager live-media capture into the content cache)', () => {
-  let cacheDir: string;
-  beforeEach(() => {
-    cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ig-live-cache-'));
-  });
-  afterEach(() => {
-    fs.rmSync(cacheDir, { recursive: true, force: true });
-  });
-
-  function liveMsg(
-    attachments: { type: string; url?: string }[],
-  ): InstagramMessage {
-    return {
-      id: 'mLive',
-      from_id: 'Bob',
-      from_name: 'Bob',
-      text: '',
-      ts_ms: 1749810000000,
-      attachments,
-    };
-  }
-
-  test('downloads a photo, caches bytes by content_hash, creates a null-markdown file doc', async () => {
-    const { ctx, docs } = captureHost();
-    const fetchImpl = jest
-      .fn()
-      .mockResolvedValue(fakeMediaResponse(BIG_JPEG)) as unknown as typeof fetch;
-
-    const n = await downloadLiveMediaDocs(
-      ctx,
-      'thread1',
-      [liveMsg([{ type: 'photo', url: 'https://cdn.example/abc.jpg?sig=1' }])],
-      cacheDir,
-      { fetchImpl },
+describe('deriveFilename', () => {
+  test('uses the URL basename when it has an extension', () => {
+    expect(deriveFilename('https://cdn.example/a/pic.jpg?sig=1', 'image/jpeg', 'm1', 0)).toBe(
+      'pic.jpg',
     );
+  });
+  test('synthesizes <msgId>_<slot><ext> from the content type otherwise', () => {
+    expect(deriveFilename('https://cdn.example/blob', 'image/png', 'm1', 2)).toBe('m1_2.png');
+    expect(deriveFilename('https://cdn.example/blob', '', 'm1', 0)).toBe('m1_0');
+  });
+});
 
-    expect(n).toBe(1);
-    expect(docs).toHaveLength(1);
-    const doc = docs[0];
-    expect(doc.source).toBe('instagram');
-    expect(doc.type).toBe(FILE_DOC_TYPE);
-    expect(doc.markdown).toBeNull();
-    const meta = doc.metadata as Record<string, unknown>;
-    expect(meta.mime_type).toBe('image/jpeg');
-    expect(meta.extraction_status).toBe('unsupported');
-    expect(meta.thread_id).toBe('thread1');
-    expect(meta.message_id).toBe('mLive');
-    // the cache filename is the sha256 of the bytes == content_hash
-    const cached = path.join(cacheDir, doc.content_hash!);
-    expect(fs.existsSync(cached)).toBe(true);
-    expect(fs.readFileSync(cached).equals(BIG_JPEG)).toBe(true);
+describe('downloadThreadMedia', () => {
+  test('downloads a photo and returns a MediaItem with stable externalId, mime, day, bytes', async () => {
+    const { deps, fetched, warnings } = makeDeps([
+      bytesResponse(200, BIG_JPEG, { 'content-type': 'image/jpeg' }),
+    ]);
+    const msg = liveMsg([{ type: 'photo', url: 'https://cdn.example/abc.jpg?sig=1' }]);
+
+    const items = await downloadThreadMedia(deps, 'thread1', [msg]);
+
+    expect(fetched).toEqual(['https://cdn.example/abc.jpg?sig=1']);
+    expect(warnings).toEqual([]);
+    expect(items).toEqual([
+      {
+        kind: 'media',
+        externalId: 'live-media:thread1:mLive:0',
+        threadId: 'thread1',
+        messageId: 'mLive',
+        day: dayKey(msg.ts_ms),
+        filename: 'abc.jpg',
+        mime: 'image/jpeg',
+        bytes: BIG_JPEG,
+        sentAtMs: msg.ts_ms,
+      },
+    ]);
   });
 
-  test('is idempotent: existing doc → no fetch, no write', async () => {
-    const { ctx, docs } = captureHost({ existing: { id: 5n } as Document });
-    const fetchImpl = jest.fn() as unknown as typeof fetch;
-    const n = await downloadLiveMediaDocs(
-      ctx,
-      'thread1',
-      [liveMsg([{ type: 'photo', url: 'https://cdn.example/abc.jpg' }])],
-      cacheDir,
-      { fetchImpl },
-    );
-    expect(n).toBe(0);
-    expect(docs).toHaveLength(0);
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect(fs.readdirSync(cacheDir)).toHaveLength(0);
+  test('skips an attachment whose doc already exists — no fetch at all', async () => {
+    const { deps, fetched } = makeDeps([], {
+      hasDoc: async (id) => id === 'live-media:thread1:mLive:0',
+    });
+    const items = await downloadThreadMedia(deps, 'thread1', [
+      liveMsg([{ type: 'photo', url: 'https://cdn.example/abc.jpg' }]),
+    ]);
+    expect(items).toEqual([]);
+    expect(fetched).toEqual([]);
   });
 
   test('skips videos (not OCR candidates) without fetching', async () => {
-    const { ctx, docs } = captureHost();
-    const fetchImpl = jest.fn() as unknown as typeof fetch;
-    const n = await downloadLiveMediaDocs(
-      ctx,
-      'thread1',
-      [liveMsg([{ type: 'video', url: 'https://cdn.example/clip.mp4' }])],
-      cacheDir,
-      { fetchImpl },
-    );
-    expect(n).toBe(0);
-    expect(docs).toHaveLength(0);
-    expect(fetchImpl).not.toHaveBeenCalled();
+    const { deps, fetched } = makeDeps([]);
+    const items = await downloadThreadMedia(deps, 'thread1', [
+      liveMsg([{ type: 'video', url: 'https://cdn.example/clip.mp4' }]),
+    ]);
+    expect(items).toEqual([]);
+    expect(fetched).toEqual([]);
   });
 
-  test('an expired/failed fetch leaves no doc and never throws', async () => {
-    const { ctx, docs } = captureHost();
-    const fetchImpl = jest
-      .fn()
-      .mockRejectedValue(new Error('410 Gone')) as unknown as typeof fetch;
-    const n = await downloadLiveMediaDocs(
-      ctx,
-      'thread1',
-      [liveMsg([{ type: 'photo', url: 'https://cdn.example/expired.jpg' }])],
-      cacheDir,
-      { fetchImpl },
-    );
-    expect(n).toBe(0);
-    expect(docs).toHaveLength(0);
-    expect(fs.readdirSync(cacheDir)).toHaveLength(0);
+  test('skips media over the 25 MiB cap — declared via content-length or actual body size', async () => {
+    const { deps } = makeDeps([
+      bytesResponse(200, BIG_JPEG, {
+        'content-type': 'image/jpeg',
+        'content-length': String(MEDIA_SIZE_CAP_BYTES + 1),
+      }),
+      bytesResponse(200, new Uint8Array(MEDIA_SIZE_CAP_BYTES + 1), {
+        'content-type': 'image/jpeg',
+      }),
+      bytesResponse(200, new Uint8Array(0), { 'content-type': 'image/jpeg' }),
+    ]);
+    const msgs = [
+      liveMsg([{ type: 'photo', url: 'https://cdn.example/declared-huge.jpg' }], 'm1'),
+      liveMsg([{ type: 'photo', url: 'https://cdn.example/actually-huge.jpg' }], 'm2'),
+      liveMsg([{ type: 'photo', url: 'https://cdn.example/empty.jpg' }], 'm3'),
+    ];
+    expect(await downloadThreadMedia(deps, 'thread1', msgs)).toEqual([]);
+  });
+
+  test('an expired/failed CDN fetch is tolerated: warn, skip, keep going', async () => {
+    const { deps, warnings } = makeDeps([
+      new Error('410 Gone'),
+      bytesResponse(404, new Uint8Array(0), {}),
+      bytesResponse(200, BIG_JPEG, { 'content-type': 'image/jpeg' }),
+    ]);
+    const msgs = [
+      liveMsg([{ type: 'photo', url: 'https://cdn.example/expired.jpg' }], 'm1'),
+      liveMsg([{ type: 'photo', url: 'https://cdn.example/gone.jpg' }], 'm2'),
+      liveMsg([{ type: 'photo', url: 'https://cdn.example/ok.jpg' }], 'm3'),
+    ];
+
+    const items = await downloadThreadMedia(deps, 'thread1', msgs);
+
+    expect(items.map((i) => i.externalId)).toEqual(['live-media:thread1:m3:0']);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain('live-media:thread1:m1:0');
+    expect(warnings[1]).toContain('live-media:thread1:m2:0');
+  });
+
+  test('drops bytes it cannot prove are image/PDF (unknown content-type, no usable extension)', async () => {
+    const { deps } = makeDeps([
+      bytesResponse(200, BIG_JPEG, { 'content-type': 'application/octet-stream' }),
+    ]);
+    const items = await downloadThreadMedia(deps, 'thread1', [
+      // kind 'image' passes the candidate gate, but the response proves nothing
+      liveMsg([{ type: 'image', url: 'https://cdn.example/blob' }]),
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  test('trusts an image content-type over a missing extension and synthesizes the filename', async () => {
+    const { deps } = makeDeps([
+      bytesResponse(200, BIG_JPEG, { 'content-type': 'image/png; charset=binary' }),
+    ]);
+    const items = await downloadThreadMedia(deps, 'thread1', [
+      liveMsg([{ type: 'photo', url: 'https://cdn.example/blob' }]),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0].mime).toBe('image/png');
+    expect(items[0].filename).toBe('mLive_0.png');
   });
 });
