@@ -205,12 +205,19 @@ describe('connect', () => {
 
     const schema = getSchema() as {
       required: string[];
-      properties: Record<string, { title?: string; format?: string }>;
+      'x-steps': Array<{ title: string; link?: string }>;
+      properties: Record<
+        string,
+        { title?: string; format?: string; examples?: string[] }
+      >;
     };
     expect(schema.required).toEqual(['password']);
     expect(Object.keys(schema.properties)).toEqual(['password']);
     expect(schema.properties.password.title).toBe('Instagram access token');
     expect(schema.properties.password.format).toBe('password');
+    expect(schema['x-steps']).toHaveLength(2);
+    expect(schema['x-steps'][0].link).toBe('https://developers.facebook.com/apps');
+    expect(schema.properties.password.examples?.[0]).toBe('Long-lived token…');
     expect(calls).toHaveLength(0);
   });
 

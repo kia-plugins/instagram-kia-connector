@@ -120,12 +120,28 @@ export function createInstagramSource(
     async connect(auth: AuthChannel) {
       const answers = await auth.prompt({
         type: 'object',
+        description:
+          'Reads your Instagram DMs via the official API. Requires an Instagram Professional (Business or Creator) account linked to a Facebook Page.',
+        'x-steps': [
+          {
+            title: 'Create a Meta app',
+            body: 'Create an app (Business type), add the Instagram product, and connect your Instagram Professional account.',
+            link: 'https://developers.facebook.com/apps',
+          },
+          {
+            title: 'Generate a long-lived access token',
+            body: 'Grant the instagram_business_manage_messages permission, then generate a long-lived token with the Access Token Tool.',
+          },
+        ],
         required: ['password'],
         properties: {
           password: {
             type: 'string',
             title: 'Instagram access token',
             format: 'password',
+            examples: ['Long-lived token…'],
+            description:
+              'Long-lived tokens expire after ~60 days — when the account shows "needs reauth", paste a fresh one.',
           },
         },
       });
