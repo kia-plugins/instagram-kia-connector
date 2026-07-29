@@ -10,7 +10,7 @@
  */
 import { createInstagramSource } from '../source';
 import { InstagramAuthError, type NetFetch } from '../client';
-import { SourceAuthError } from '../kiagent-source-errors';
+import { SourceAuthError } from '@kiagent/connector-sdk';
 import { dayKey } from '../chat-day';
 import {
   CHAT_DAY_DOC_TYPE,
@@ -30,7 +30,7 @@ import type {
   HostFor,
   Query,
   Session,
-} from '../kiagent-contracts';
+} from '@kiagent/connector-sdk';
 
 const EPOCH_ISO = new Date(0).toISOString();
 const ACCOUNT_ID = 'acc-1';
@@ -147,6 +147,12 @@ function makeAuth(answers: Record<string, unknown>): {
       return answers;
     },
     status: () => {},
+    // Instagram connect is password-only — never reaches for the folder
+    // picker. Contracts vintage jump added this method to AuthChannel;
+    // unscripted here matches the SDK's own fakeAuthChannel convention.
+    pickFolders: async () => {
+      throw new Error('not scripted: pickFolders');
+    },
   };
   return { auth, getSchema: () => schema };
 }
