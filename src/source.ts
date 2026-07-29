@@ -31,7 +31,8 @@ import type {
   HostFor,
   Session,
   Source,
-} from './kiagent-contracts';
+} from '@kiagent/connector-sdk';
+import { SourceAuthError } from '@kiagent/connector-sdk';
 import {
   InstagramAuthError,
   InstagramClient,
@@ -46,7 +47,6 @@ import {
   renderDay,
 } from './chat-day';
 import { downloadThreadMedia } from './media';
-import { SourceAuthError } from './kiagent-source-errors';
 import {
   CHAT_DAY_DOC_TYPE,
   FILE_DOC_TYPE,
