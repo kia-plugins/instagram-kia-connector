@@ -284,6 +284,9 @@ describe('auth errors (v2 fix — v1 had no auth handling)', () => {
     expect(error).toBeInstanceOf(InstagramAuthError);
     expect((error as InstagramAuthError).httpStatus).toBe(401);
     expect((error as InstagramAuthError).graphCode).toBe(190);
+    // Source-taxonomy contract: the engine keys on `code`, never
+    // instanceof — without it a dead token would retry forever.
+    expect((error as InstagramAuthError).code).toBe('auth');
     expect((error as Error).message).toMatch(/— reconnect the account$/);
     expect(calls).toHaveLength(1);
     expect(sleeps).toHaveLength(0);

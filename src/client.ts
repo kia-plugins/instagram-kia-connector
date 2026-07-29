@@ -91,6 +91,10 @@ export function isAuthErrorGraph(status: number, body: string): boolean {
 /** Never retried; always propagated so the engine flips the account to
  *  needsReauth. The message MUST end with "— reconnect the account". */
 export class InstagramAuthError extends Error {
+  /** Source-taxonomy code — the engine classifies by this property (never
+   *  instanceof), so without it a dead token would retry forever. */
+  readonly code = 'auth' as const;
+
   constructor(
     public httpStatus: number,
     public graphCode: number | undefined,

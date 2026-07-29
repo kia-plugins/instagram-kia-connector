@@ -46,6 +46,7 @@ import {
   renderDay,
 } from './chat-day';
 import { downloadThreadMedia } from './media';
+import { SourceAuthError } from './kiagent-source-errors';
 import {
   CHAT_DAY_DOC_TYPE,
   FILE_DOC_TYPE,
@@ -62,7 +63,7 @@ async function requireToken(session: Session): Promise<string> {
   const creds = await session.credentials();
   const token = creds?.password;
   if (!token)
-    throw new Error('no Instagram credentials — reconnect the account');
+    throw new SourceAuthError('no Instagram credentials — reconnect the account');
   return token;
 }
 

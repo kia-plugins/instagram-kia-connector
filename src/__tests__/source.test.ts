@@ -10,6 +10,7 @@
  */
 import { createInstagramSource } from '../source';
 import { InstagramAuthError, type NetFetch } from '../client';
+import { SourceAuthError } from '../kiagent-source-errors';
 import { dayKey } from '../chat-day';
 import {
   CHAT_DAY_DOC_TYPE,
@@ -504,6 +505,24 @@ describe('pull — sweep and cursor', () => {
     await expect(drain(source, session, null)).rejects.toThrow(/reconnect the account/);
     expect(calls).toHaveLength(0);
   });
+
+  it('the no-credentials guard throws SourceAuthError (code "auth") with the exact message, unchanged', async () => {
+    const { fetchFn } = routedFetch([]);
+    const source = createInstagramSource(makeHost(fetchFn).host, instantClock);
+    const { session } = makeSession(null);
+
+    let error: unknown;
+    try {
+      await drain(source, session, null);
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(SourceAuthError);
+    expect((error as SourceAuthError).code).toBe('auth');
+    expect((error as Error).message).toBe(
+      'no Instagram credentials — reconnect the account',
+    );
+  });
 });
 
 describe('pull — media', () => {
@@ -659,6 +678,9 @@ describe('toDocument', () => {
       createdAt: T1,
     });
     expect((doc.markdown as string).split('\n\n')).toHaveLength(2);
+    // Pin the literal, not the imported constant — a typo in CHAT_DAY_DOC_TYPE
+    // itself would ship green if this only compared against the constant.
+    expect(doc.type).toBe('instagram.chat_day');
   });
 
   it('renders a media file document — binary bytes, null markdown, chat-day parent', () => {
@@ -693,6 +715,9 @@ describe('toDocument', () => {
       },
       createdAt: T2,
     });
+    // Pin the literal, not the imported constant — a typo in FILE_DOC_TYPE
+    // itself would ship green if this only compared against the constant.
+    expect(doc.type).toBe('file');
   });
 
   it('exposes the v2 descriptor exactly as specced', () => {
