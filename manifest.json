@@ -2,7 +2,7 @@
   "id": "kia.instagram",
   "name": "Instagram",
   "version": "2.0.3",
-  "engine": "^1.0.0",
+  "engine": "^1.2.0",
   "entry": "dist/index.js",
   "caps": [
     "net",
