@@ -99,6 +99,7 @@ function makeHost(
     },
     search: async () => [],
     count: async () => 0,
+    countBy: async () => [],
     accounts: async () => [],
   };
   return {

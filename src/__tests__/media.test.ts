@@ -13,6 +13,7 @@ import {
   isOcrCandidateAttachment,
   type MediaDownloadDeps,
 } from '../media';
+import type { PluginNetResult } from '@kiagent/connector-sdk';
 import { dayKey } from '../chat-day';
 import type { InstagramMessage } from '../types';
 
@@ -54,7 +55,7 @@ function makeDeps(
       i += 1;
       if (res === undefined) throw new Error(`no scripted media response for ${url}`);
       if (res instanceof Error) throw res;
-      return res;
+      return res as PluginNetResult;
     },
     hasDoc,
     warn: (msg) => {

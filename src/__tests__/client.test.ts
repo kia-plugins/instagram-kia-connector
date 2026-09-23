@@ -13,6 +13,7 @@ import {
   isRetryableGraph,
   type NetFetch,
 } from '../client';
+import type { PluginNetResult } from '@kiagent/connector-sdk';
 
 const TEST_TOKEN = 'IGQVJtest-token-not-real';
 
@@ -48,7 +49,8 @@ function scriptedFetch(responses: unknown[]): {
       throw new Error(`scriptedFetch: no response queued for call #${i} (${url})`);
     }
     if (res instanceof Error) throw res;
-    return res;
+    // Scripted payloads may be deliberately malformed; the client must cope.
+    return res as PluginNetResult;
   };
   return { fetchFn, calls };
 }

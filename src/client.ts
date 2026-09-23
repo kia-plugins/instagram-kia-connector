@@ -36,7 +36,9 @@
  */
 import type { InstagramMessage, InstagramThread } from './types';
 
-export type NetFetch = (url: string, init?: unknown) => Promise<unknown>;
+// The host's own net.fetch type (PluginNet['fetch']), via the SDK.
+import type { NetFetch } from '@kiagent/connector-sdk/http';
+export type { NetFetch };
 
 export const GRAPH_BASE = 'https://graph.instagram.com/v21.0';
 
