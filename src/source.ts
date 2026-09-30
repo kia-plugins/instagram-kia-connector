@@ -70,6 +70,24 @@ async function requireToken(session: Session): Promise<string> {
 const errText = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 
+/**
+ * The reply recipient of a thread: its ONE other participant. The Messaging
+ * API is 1:1, so a thread that is not exactly you + one person — or where
+ * you cannot be recognised (by the id `connect` stored, or your username) —
+ * gets no recipient, never a guess.
+ */
+export function recipientOf(
+  thread: InstagramThread,
+  self: { id?: unknown; username?: string },
+): string | undefined {
+  const refs = thread.participantRefs ?? [];
+  const selfName = self.username?.toLowerCase();
+  const others = refs.filter(
+    (p) => p.id !== self.id && (!selfName || p.username.toLowerCase() !== selfName),
+  );
+  return refs.length === 2 && others.length === 1 ? others[0].id : undefined;
+}
+
 export function createInstagramSource(
   host: HostFor<'net' | 'query'>,
   // Test seam only: the client's retry backoff resolves instantly instead of
@@ -94,12 +112,17 @@ export function createInstagramSource(
       );
       const priorMsgs =
         (prior?.metadata?.messages as InstagramMessage[] | undefined) ?? [];
+      const recipientId = recipientOf(thread, {
+        id: (session.account.config as { ig_user_id?: unknown })?.ig_user_id,
+        username: session.account.identifier,
+      });
       items.push({
         kind: 'chat_day',
         thread: {
           id: thread.id,
           name: thread.name,
           participants: thread.participants,
+          ...(recipientId ? { recipientId } : {}),
         },
         day,
         messages: mergeMessages(priorMsgs, incoming),
@@ -183,7 +206,10 @@ export function createInstagramSource(
       const committed: InstagramCursor = cursor ?? {
         last_activity_iso: EPOCH_ISO,
       };
-      const cursorMs = Date.parse(committed.last_activity_iso) || 0;
+      // A sweep from before reply targets re-reads every thread once (≤20
+      // messages each) so recent days gain their recipient.
+      const cursorMs =
+        committed.outbound === 1 ? Date.parse(committed.last_activity_iso) || 0 : 0;
 
       const threads = await client.listThreads();
       // Track the sweep's high-water mark, but do NOT advance the committed
@@ -193,6 +219,10 @@ export function createInstagramSource(
       // advances this mark — the skip is durable (shared-brief per-container
       // rule); its messages return on its next activity.
       let newestObserved = cursorMs;
+      // The reply-target migration completes only on a sweep where every
+      // thread was re-read — a skipped thread's stored days would otherwise
+      // stay without a target until its next activity.
+      let threadFailed = false;
 
       for (const thread of threads) {
         // Belt-and-suspenders (the client already floors unparseable
@@ -247,6 +277,7 @@ export function createInstagramSource(
           // propagate — every later call would fail identically and the
           // engine flips the account to needsReauth.
           if (e instanceof InstagramAuthError) throw e;
+          threadFailed = true;
           session.log(
             'warn',
             `instagram: thread ${thread.id} skipped: ${errText(e)}`,
@@ -261,6 +292,10 @@ export function createInstagramSource(
         items: [],
         cursor: {
           last_activity_iso: new Date(Math.max(0, newestObserved)).toISOString(),
+          // (a new account has nothing stored to migrate)
+          ...(cursor === null || committed.outbound === 1 || !threadFailed
+            ? { outbound: 1 as const }
+            : {}),
         },
       };
     },
@@ -279,6 +314,15 @@ export function createInstagramSource(
             thread_id: item.thread.id,
             thread_name: item.thread.name,
             participants: item.thread.participants,
+            // Reply target for kiagent-core's draft_reply (1:1 threads only).
+            ...(item.thread.recipientId
+              ? {
+                  outbound: {
+                    ref: { recipientId: item.thread.recipientId },
+                    display: item.thread.name,
+                  },
+                }
+              : {}),
             last_message_at: new Date(lastTs).toISOString(),
             // The full merged array — the ledger the NEXT merge reads.
             messages: msgs,

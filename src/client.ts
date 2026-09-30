@@ -46,6 +46,8 @@ export const GRAPH_BASE = 'https://graph.instagram.com/v21.0';
 // rather than as an HTTP 429 (4 = app rate limit, 17 = user rate limit,
 // 32 = page rate limit, 613 = custom-level throttle).
 const GRAPH_THROTTLE_CODES = new Set([4, 17, 32, 613]);
+/** Messaging API: code 10 with this subcode = the 24-hour window closed. */
+export const OUTSIDE_WINDOW_SUBCODE = 2534022;
 /** Graph OAuthException code for an invalid/expired token. */
 const GRAPH_AUTH_CODE = 190;
 /** Retries happen while attempt < MAX_ATTEMPTS (v1 loop parity). */
@@ -60,11 +62,16 @@ interface HostResponse {
   body: Uint8Array;
 }
 
-function parseGraphError(body: string): { code?: number; message?: string } {
+function parseGraphError(body: string): { code?: number; subcode?: number; message?: string } {
   try {
-    const err = (JSON.parse(body) as { error?: { code?: unknown; message?: unknown } })?.error;
+    const err = (
+      JSON.parse(body) as {
+        error?: { code?: unknown; error_subcode?: unknown; message?: unknown };
+      }
+    )?.error;
     return {
       code: typeof err?.code === 'number' ? err.code : undefined,
+      subcode: typeof err?.error_subcode === 'number' ? err.error_subcode : undefined,
       message: typeof err?.message === 'string' ? err.message : undefined,
     };
   } catch {
@@ -196,6 +203,48 @@ export class InstagramClient {
     }
   }
 
+  /**
+   * Send one text DM (Messaging API, 1:1). NOT `get()`'s retry policy: a send
+   * is not idempotent, so nothing is retried — a network error or 5xx may
+   * follow an accepted message. One deadline bounds the request (the host
+   * fetch's own timeout), so nothing is in flight once this has thrown.
+   * Failure wording is kiagent-core's outbound contract (error-copy.ts).
+   */
+  async sendText(recipientId: string, text: string, deadlineMs: number): Promise<string | undefined> {
+    const url = `${GRAPH_BASE}/me/messages`;
+    const res = (await this.fetchFn(url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${this.deps.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ recipient: { id: recipientId }, message: { text } }),
+      timeoutMs: deadlineMs,
+    } as never)) as HostResponse;
+    const body = new TextDecoder().decode(res.body);
+    if (res.status >= 200 && res.status < 300) {
+      // Accepted is accepted: an unreadable body only costs the message id.
+      let id: unknown;
+      try {
+        id = (JSON.parse(body || '{}') as { message_id?: unknown }).message_id;
+      } catch {
+        id = undefined;
+      }
+      return typeof id === 'string' ? id : undefined;
+    }
+    const { code, subcode, message } = parseGraphError(body);
+    const detail = message ?? `HTTP ${res.status}`;
+    if (isAuthErrorGraph(res.status, body))
+      throw new Error(`your Instagram token no longer works (${detail}) — reconnect the account in Settings`);
+    if (res.status === 429 || (code !== undefined && GRAPH_THROTTLE_CODES.has(code)))
+      throw new Error('rate-limited: Instagram is throttling sends — nothing was sent');
+    if (code === 10 && subcode === OUTSIDE_WINDOW_SUBCODE)
+      throw new Error(
+        "not sent: Instagram only allows replies within 24 hours of the other person's last message",
+      );
+    throw new Error(`instagram-graph ${res.status} ${url} ${body.slice(0, 500)}`);
+  }
+
   async getMe(): Promise<{ id: string; username?: string }> {
     return this.get('/me', { fields: 'id,username' });
   }
@@ -206,7 +255,7 @@ export class InstagramClient {
         id: string;
         updated_time?: string;
         name?: string;
-        participants?: { data: { username?: string }[] };
+        participants?: { data: { username?: string; id?: string }[] };
       }[];
     }>('/me/conversations', {
       platform: 'instagram',
@@ -224,6 +273,9 @@ export class InstagramClient {
       participants: (t.participants?.data ?? [])
         .map((p) => p.username ?? '')
         .filter(Boolean),
+      participantRefs: (t.participants?.data ?? [])
+        .filter((p): p is { id: string; username?: string } => typeof p.id === 'string')
+        .map((p) => ({ id: p.id, username: p.username ?? '' })),
       // A truthy-but-unparseable updated_time must not become NaN: NaN would
       // poison pull()'s Math.max high-water mark (the final cursor's
       // toISOString() throws) and never gate out (`NaN <= cursorMs` is

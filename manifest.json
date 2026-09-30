@@ -1,18 +1,21 @@
 {
   "id": "kia.instagram",
   "name": "Instagram",
-  "version": "2.0.6",
-  "engine": "^2.0.0",
+  "version": "2.1.0",
+  "engine": "^2.6.0",
   "entry": "dist/index.js",
   "caps": [
     "net",
-    "query"
+    "query",
+    "send"
   ],
   "contributes": {
     "sources": [
       "instagram"
     ],
-    "senders": []
+    "senders": [
+      "instagram"
+    ]
   },
   "icon": "icon.png"
 }

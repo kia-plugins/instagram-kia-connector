@@ -34,12 +34,18 @@ export interface InstagramThread {
   id: string;
   name: string;
   participants: string[];
+  /** Participant ids (Instagram-scoped) with usernames — the reply
+   *  recipient is chosen from these. */
+  participantRefs?: Array<{ id: string; username: string }>;
   last_activity_ms: number;
 }
 
 export interface InstagramCursor {
   /** Newest observed thread `updated_time` across a COMPLETED sweep (ISO). */
   last_activity_iso: string;
+  /** Set once a sweep re-read every thread with reply targets. Absent →
+   *  the next sweep ignores `last_activity_iso` once. */
+  outbound?: 1;
 }
 
 /** One conversation-day carrying the FULL merged message ledger (prior doc's
@@ -47,7 +53,14 @@ export interface InstagramCursor {
  *  complete day from this item alone, no I/O. */
 export interface ChatDayItem {
   kind: 'chat_day';
-  thread: { id: string; name: string; participants: string[] };
+  thread: {
+    id: string;
+    name: string;
+    participants: string[];
+    /** The one other person in a 1:1 thread (Instagram-scoped id), frozen at
+     *  sync — the reply recipient. Absent when the thread is not 1:1. */
+    recipientId?: string;
+  };
   /** Local-time YYYY-MM-DD (v1 dayKey). */
   day: string;
   messages: InstagramMessage[];

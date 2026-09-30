@@ -129,7 +129,7 @@ describe('response mappings (v1 parity)', () => {
           {
             id: 't2',
             updated_time: '2026-06-13T11:00:00+0000',
-            participants: { data: [{ username: 'alice' }, { username: 'bob' }] },
+            participants: { data: [{ username: 'alice', id: '17841' }, { username: 'bob' }] },
           },
         ],
       }),
@@ -142,12 +142,16 @@ describe('response mappings (v1 parity)', () => {
         id: 't1',
         name: 't1', // no name, no participants → id fallback
         participants: [],
+        participantRefs: [],
         last_activity_ms: Date.parse('2026-06-13T10:00:00+0000'),
       },
       {
         id: 't2',
         name: 'alice, bob',
         participants: ['alice', 'bob'],
+        // ids kept (the reply recipient is picked from them); an entry
+        // without an id is dropped
+        participantRefs: [{ id: '17841', username: 'alice' }],
         last_activity_ms: Date.parse('2026-06-13T11:00:00+0000'),
       },
     ]);

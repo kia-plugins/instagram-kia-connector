@@ -317,7 +317,7 @@ describe('pull — sweep and cursor', () => {
     expect(batches[2]).toEqual({
       phase: 'live',
       items: [],
-      cursor: { last_activity_iso: T2 },
+      cursor: { last_activity_iso: T2, outbound: 1 },
     });
 
     // the merge read used the session's account id and the chat-day type
@@ -354,7 +354,7 @@ describe('pull — sweep and cursor', () => {
     expect(batches[1]).toEqual({
       phase: 'live',
       items: [],
-      cursor: { last_activity_iso: T2 },
+      cursor: { last_activity_iso: T2, outbound: 1 },
     });
   });
 
@@ -381,7 +381,7 @@ describe('pull — sweep and cursor', () => {
     expect(dayItem.day).not.toContain('NaN');
     expect(warnings.some((w) => w.includes('mBad') && w.includes('created_time'))).toBe(true);
     // sweep completed normally: final cursor advanced, toDocument renders
-    expect(batches[1].cursor).toEqual({ last_activity_iso: T2 });
+    expect(batches[1].cursor).toEqual({ last_activity_iso: T2, outbound: 1 });
     const doc = source.toDocument(dayItem) as DocumentInput;
     expect(doc.externalId).toBe(`thread:t1:${dayKey(Date.parse(T2))}`);
     expect(doc.markdown).toContain('kept');
@@ -399,13 +399,82 @@ describe('pull — sweep and cursor', () => {
     const source = createInstagramSource(makeHost(fetchFn).host, instantClock);
     const { session } = makeSession({ password: 'IGQVJtest-token' });
 
-    const batches = await drain(source, session, { last_activity_iso: T2 });
+    const batches = await drain(source, session, { last_activity_iso: T2, outbound: 1 });
 
     expect(calls.filter((u) => u.includes('/messages'))).toHaveLength(1);
     expect(calls.some((u) => u.includes('/t2/messages'))).toBe(false);
     expect(batches).toHaveLength(2);
-    expect(batches[0].cursor).toEqual({ last_activity_iso: T2 }); // unchanged mid-sweep
-    expect(batches[1].cursor).toEqual({ last_activity_iso: T3 }); // advanced at the end
+    expect(batches[0].cursor).toEqual({ last_activity_iso: T2, outbound: 1 }); // unchanged mid-sweep
+    expect(batches[1].cursor).toEqual({ last_activity_iso: T3, outbound: 1 }); // advanced at the end
+  });
+
+  it('a cursor from before reply support re-sweeps every thread once, so stored days gain their reply target', async () => {
+    const { fetchFn, calls } = routedFetch([
+      {
+        match: '/me/conversations',
+        res: jsonResponse(200, { data: [threadJson('t1', T3), threadJson('t2', T1)] }),
+      },
+      { match: '/t1/messages', res: jsonResponse(200, { data: [msgJson('m3', T3, 'alice', 'new')] }) },
+      { match: '/t2/messages', res: jsonResponse(200, { data: [msgJson('m1', T1, 'bob', 'old')] }) },
+    ]);
+    const source = createInstagramSource(makeHost(fetchFn).host, instantClock);
+    const { session } = makeSession({ password: 'IGQVJtest-token' });
+
+    const batches = await drain(source, session, { last_activity_iso: T2 });
+
+    expect(calls.some((u) => u.includes('/t2/messages'))).toBe(true); // not gated
+    expect(batches[batches.length - 1].cursor).toEqual({ last_activity_iso: T3, outbound: 1 });
+  });
+
+  it('the migration stays pending while any thread failed, so the next sweep re-reads everything', async () => {
+    const failing = () => {
+      const { fetchFn } = routedFetch([
+        {
+          match: '/me/conversations',
+          res: jsonResponse(200, { data: [threadJson('t1', T3), threadJson('t2', T1)] }),
+        },
+        { match: '/t1/messages', res: jsonResponse(200, { data: [msgJson('m3', T3, 'alice', 'new')] }) },
+        { match: '/t2/messages', res: jsonResponse(400, { error: { code: 100, message: 'broken' } }) },
+      ]);
+      return createInstagramSource(makeHost(fetchFn).host, instantClock);
+    };
+    const { session } = makeSession({ password: 'IGQVJtest-token' });
+
+    const migrating = await drain(failing(), session, { last_activity_iso: T2 });
+    expect(migrating[migrating.length - 1].cursor).toEqual({ last_activity_iso: T3 }); // flag held back
+
+    const migrated = await drain(failing(), session, { last_activity_iso: T2, outbound: 1 });
+    expect(migrated[migrated.length - 1].cursor).toEqual({ last_activity_iso: T3, outbound: 1 }); // durable skip as before
+  });
+
+  it('a 1:1 thread’s day items carry the other person as recipient, matched against the connected account', async () => {
+    const { fetchFn } = routedFetch([
+      {
+        match: '/me/conversations',
+        res: jsonResponse(200, {
+          data: [
+            {
+              id: 't1',
+              updated_time: T1,
+              participants: { data: [{ id: '178', username: 'me_biz' }, { id: '555', username: 'alice' }] },
+            },
+          ],
+        }),
+      },
+      { match: '/t1/messages', res: jsonResponse(200, { data: [msgJson('m1', T1, 'alice', 'hi')] }) },
+    ]);
+    const source = createInstagramSource(makeHost(fetchFn).host, instantClock);
+    const { session: base } = makeSession({ password: 'IGQVJtest-token' });
+    const session: Session = {
+      ...base,
+      account: { id: ACCOUNT_ID, identifier: 'me_biz', config: { ig_user_id: '178' } } as unknown as Account,
+    };
+
+    const batches = await drain(source, session, null);
+    const day = batches.flatMap((b) => b.items).find((i) => i.kind === 'chat_day') as ChatDayItem;
+    expect(day.thread.recipientId).toBe('555');
+    const doc = source.toDocument(day) as DocumentInput;
+    expect(doc.metadata.outbound).toEqual({ ref: { recipientId: '555' }, display: day.thread.name });
   });
 
   it('empty inbox still yields the final batch with the cursor floored at epoch (delta never sees null)', async () => {
@@ -418,7 +487,7 @@ describe('pull — sweep and cursor', () => {
     const batches = await drain(source, session, null);
 
     expect(batches).toEqual([
-      { phase: 'live', items: [], cursor: { last_activity_iso: EPOCH_ISO } },
+      { phase: 'live', items: [], cursor: { last_activity_iso: EPOCH_ISO, outbound: 1 } },
     ]);
   });
 
@@ -476,7 +545,7 @@ describe('pull — sweep and cursor', () => {
     expect((batches[0].items[0] as ChatDayItem).thread.id).toBe('t2');
     // per-container rule: the failed thread's activity still advances the
     // final cursor (durable skip; its messages return on its next activity)
-    expect(batches[1].cursor).toEqual({ last_activity_iso: T3 });
+    expect(batches[1].cursor).toEqual({ last_activity_iso: T3, outbound: 1 });
   });
 
   it('propagates a 401 from listThreads as InstagramAuthError (engine flips to needsReauth)', async () => {
@@ -621,7 +690,7 @@ describe('pull — media', () => {
 
     expect(batches[0].items.map((i) => i.kind)).toEqual(['chat_day']);
     expect(warnings.some((w) => w.includes('live-media:t1:m1:0'))).toBe(true);
-    expect(batches[1].cursor).toEqual({ last_activity_iso: T2 }); // sweep completed
+    expect(batches[1].cursor).toEqual({ last_activity_iso: T2, outbound: 1 }); // sweep completed
   });
 
   it('never downloads videos — they stay text placeholders in the day markdown', async () => {

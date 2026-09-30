@@ -1,6 +1,6 @@
 {
   "name": "instagram-kia-connector",
-  "version": "2.0.6",
+  "version": "2.1.0",
   "private": true,
   "description": "Instagram connector for KIAgent (new extension platform)",
   "license": "MIT",
